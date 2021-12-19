@@ -65,7 +65,6 @@ import Network.Socks5 (defaultSocksConf, socksConnectWithSocket, SocksAddress(..
 import Network.Socket
 import qualified Network.Socket.ByteString as N
 
-import Data.Tuple (swap)
 import Data.Default.Class
 import Data.Data
 import Data.ByteString (ByteString)
@@ -171,56 +170,11 @@ connectFromSocket cg sock p = withSecurity (connectionUseSecure p)
 
 -- | connect to a destination using the parameter
 connectTo :: ConnectionContext -- ^ The global context of this connection.
-          -> ConnectionParams  -- ^ The parameters for this connection (where to connect, and such).
+          -> ConnectionParams  -- ^ The parameters for this connection (where to connect, and such).          
           -> IO Connection     -- ^ The new established connection on success.
-connectTo cg cParams = do
-    let conFct = doConnect (connectionUseSocks cParams)
-                           (connectionHostname cParams)
-                           (connectionPort cParams)
-    E.bracketOnError conFct (close . fst) $ \(h, _) ->
-        connectFromSocket cg h cParams
+connectTo cg cParams = 
+    connectTo' cg cParams resolve'
   where
-    sockConnect sockHost sockPort h p = do
-        (sockServ, servAddr) <- resolve' sockHost sockPort
-        let sockConf = defaultSocksConf servAddr
-        let destAddr = SocksAddress (SocksAddrDomainName $ BC.pack h) p
-        (dest, _) <- socksConnectWithSocket sockServ sockConf destAddr
-        case dest of
-            SocksAddrIPV4 h4 -> return (sockServ, SockAddrInet p h4)
-            SocksAddrIPV6 h6 -> return (sockServ, SockAddrInet6 p 0 h6 0)
-            SocksAddrDomainName _ -> error "internal error: socks connect return a resolved address as domain name"
-
-
-    doConnect proxy h p =
-        case proxy of
-            Nothing                 -> resolve' h p
-            Just (OtherProxy proxyHost proxyPort) -> resolve' proxyHost proxyPort
-            Just (SockSettingsSimple sockHost sockPort) ->
-                sockConnect sockHost sockPort h p
-            Just (SockSettingsEnvironment envName) -> do
-                -- if we can't get the environment variable or that the string cannot be parsed
-                -- we connect directly.
-                let name = maybe "SOCKS_SERVER" id envName
-                evar <- E.try (getEnv name)
-                case evar of
-                    Left (_ :: E.IOException) -> resolve' h p
-                    Right var                 ->
-                        case parseSocks var of
-                            Nothing                   -> resolve' h p
-                            Just (sockHost, sockPort) -> sockConnect sockHost sockPort h p
-
-    -- Try to parse "host:port" or "host"
-    -- if port is ommited then the default SOCKS port (1080) is assumed
-    parseSocks :: String -> Maybe (String, PortNumber)
-    parseSocks s =
-        case break (== ':') s of
-            (sHost, "")        -> Just (sHost, 1080)
-            (sHost, ':':portS) ->
-                case reads portS of
-                    [(sPort,"")] -> Just (sHost, sPort)
-                    _            -> Nothing
-            _                  -> Nothing
-
     -- Try to resolve the host/port into an address (zero to many of them), then
     -- try to connect from the first address to the last, returning the first one that
     -- succeed
@@ -244,7 +198,62 @@ connectTo cg cParams = do
                 er <- E.try act
                 case er of
                     Left err -> go (err:acc) followingActs
-                    Right r  -> return r
+                    Right r  -> return r      
+
+
+
+
+-- | connect to a destination using the parameter
+connectTo' :: ConnectionContext -- ^ The global context of this connection.
+          -> ConnectionParams  -- ^ The parameters for this connection (where to connect, and such).
+          -> (String -> PortNumber -> IO (Socket, SockAddr)) -- ^ DNS resolve function
+          -> IO Connection     -- ^ The new established connection on success.
+connectTo' cg cParams resolve = do
+    let conFct = doConnect (connectionUseSocks cParams)
+                           (connectionHostname cParams)
+                           (connectionPort cParams)
+    E.bracketOnError conFct (close . fst) $ \(h, _) ->
+        connectFromSocket cg h cParams
+  where
+    sockConnect sockHost sockPort h p = do
+        (sockServ, servAddr) <- resolve sockHost sockPort
+        let sockConf = defaultSocksConf servAddr
+        let destAddr = SocksAddress (SocksAddrDomainName $ BC.pack h) p
+        (dest, _) <- socksConnectWithSocket sockServ sockConf destAddr
+        case dest of
+            SocksAddrIPV4 h4 -> return (sockServ, SockAddrInet p h4)
+            SocksAddrIPV6 h6 -> return (sockServ, SockAddrInet6 p 0 h6 0)
+            SocksAddrDomainName _ -> error "internal error: socks connect return a resolved address as domain name"
+
+    doConnect proxy h p =
+        case proxy of
+            Nothing                 -> resolve h p
+            Just (OtherProxy proxyHost proxyPort) -> resolve proxyHost proxyPort
+            Just (SockSettingsSimple sockHost sockPort) ->
+                sockConnect sockHost sockPort h p
+            Just (SockSettingsEnvironment envName) -> do
+                -- if we can't get the environment variable or that the string cannot be parsed
+                -- we connect directly.
+                let name = maybe "SOCKS_SERVER" id envName
+                evar <- E.try (getEnv name)
+                case evar of
+                    Left (_ :: E.IOException) -> resolve h p
+                    Right var                 ->
+                        case parseSocks var of
+                            Nothing                   -> resolve h p
+                            Just (sockHost, sockPort) -> sockConnect sockHost sockPort h p
+
+    -- Try to parse "host:port" or "host"
+    -- if port is ommited then the default SOCKS port (1080) is assumed
+    parseSocks :: String -> Maybe (String, PortNumber)
+    parseSocks s =
+        case break (== ':') s of
+            (sHost, "")        -> Just (sHost, 1080)
+            (sHost, ':':portS) ->
+                case reads portS of
+                    [(sPort,"")] -> Just (sHost, sPort)
+                    _            -> Nothing
+            _                  -> Nothing
 
 -- | Put a block of data in the connection.
 connectionPut :: Connection -> ByteString -> IO ()
